@@ -18,7 +18,8 @@ venv/*
 
 # Logs
 *.log
-
+*.txt
+!requirements.txt
 
 # OS-specific ignores
 .DS_Store
