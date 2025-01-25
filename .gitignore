@@ -1,0 +1,25 @@
+# Python-specific ignores
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env/
+
+# Virtual environments
+venv/
+venv/*
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Streamlit cache
+.streamlit/
+
+# Logs
+*.log
+
+
+# OS-specific ignores
+.DS_Store
+Thumbs.db
