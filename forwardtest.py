@@ -302,9 +302,12 @@ def main():
     
     # Format the columns
     display_df['earnings_date'] = pd.to_datetime(display_df['earnings_date']).dt.strftime('%Y-%m-%d')
-    display_df['avg_iv'] = display_df['avg_iv'] * 100  # Convert to percentage
+    display_df['avg_iv'] = (display_df['avg_iv'] * 100).round(1).astype(str) + '%'
     display_df['probability_score'] = display_df['probability_score'].round(3)
-    display_df['straddle_percentage'] = display_df['straddle_percentage'].round(2)
+    display_df['straddle_percentage'] = display_df['straddle_percentage'].round(1).astype(str) + '%'
+    display_df['current_price'] = display_df['current_price'].apply(lambda x: f"${x:.2f}")
+    display_df['strike'] = display_df['strike'].apply(lambda x: f"${x:.2f}")
+    display_df['straddle_cost'] = display_df['straddle_cost'].apply(lambda x: f"${x:.2f}")
     
     # Sort by probability score
     display_df = display_df.sort_values('probability_score', ascending=False)
@@ -316,29 +319,25 @@ def main():
         'Total Volume', 'Days to Earnings', 'Probability Score'
     ]
     
-    # Add color coding based on probability score
+    # Display the dataframe with highlighting using native Streamlit features
     st.dataframe(
-        display_df.style
-        .background_gradient(
-            subset=['Probability Score'], 
-            cmap='RdYlGn'
-        )
-        .background_gradient(
-            subset=['Total Volume'],
-            cmap='Blues'
-        )
-        .background_gradient(
-            subset=['IV %'],
-            cmap='YlOrRd'
-        )
-        .format({
-            'Current Price': '${:.2f}',
-            'Strike': '${:.2f}',
-            'Straddle Cost': '${:.2f}',
-            'IV %': '{:.1f}%',
-            'Cost %': '{:.1f}%',
-            'Probability Score': '{:.3f}'
-        })
+        display_df,
+        column_config={
+            "Probability Score": st.column_config.NumberColumn(
+                format="%.3f",
+                help="Higher scores indicate better opportunities"
+            ),
+            "Total Volume": st.column_config.NumberColumn(
+                format="%d",
+                help="Combined call and put volume"
+            ),
+            "Days to Earnings": st.column_config.NumberColumn(
+                format="%d",
+                help="Days until earnings announcement"
+            )
+        },
+        hide_index=True,
+        use_container_width=True
     )
     
     # Add explanation of scoring
