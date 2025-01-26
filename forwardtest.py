@@ -76,16 +76,36 @@ class EarningsStraddle:
                 stock = yf.Ticker(symbol)
                 next_earnings = stock.calendar
                 
-                if next_earnings is not None and not next_earnings.empty:
-                    current_price = stock.info['regularMarketPrice']
-                    market_cap = stock.info['marketCap']
-                    earnings_date = next_earnings.iloc[0, 0]
+                if next_earnings is not None and isinstance(next_earnings, dict):
+                    earnings_date_raw = next_earnings.get('Earnings Date', None)
+                    
+                    # Handle different possible formats of earnings_date
+                    if isinstance(earnings_date_raw, list) and len(earnings_date_raw) > 0:
+                        earnings_date = pd.Timestamp(earnings_date_raw[0])
+                    elif earnings_date_raw is not None:
+                        earnings_date = pd.Timestamp(earnings_date_raw)
+                    else:
+                        earnings_date = None
+                    
+                    # Get the latest price data
+                    try:
+                        current_price = stock.fast_info['lastPrice']
+                        market_cap = stock.fast_info['marketCap']
+                    except:
+                        # Fallback method if fast_info fails
+                        hist = stock.history(period='1d')
+                        if not hist.empty:
+                            current_price = hist['Close'].iloc[-1]
+                            market_cap = current_price * stock.fast_info['shares']
+                        else:
+                            continue
                     
                     # Only include if market cap > $10B and earnings within next 30 days
-                    if (market_cap > 1e10 and 
+                    if (earnings_date is not None and 
+                        market_cap > 1e10 and 
                         earnings_date - pd.Timestamp.now() < pd.Timedelta(days=30)):
                         
-                        options_data = self.get_options_data(stock, current_price)
+                        options_data = self.get_options_data(stock, current_price, earnings_date)
                         if options_data:
                             stocks_with_earnings.append({
                                 'symbol': symbol,
@@ -107,7 +127,7 @@ class EarningsStraddle:
         
         return pd.DataFrame(stocks_with_earnings)
 
-    def get_options_data(self, stock, current_price):
+    def get_options_data(self, stock, current_price, earnings_date):
         """Get real options data for the stock"""
         try:
             # Get options expirations
@@ -117,7 +137,6 @@ class EarningsStraddle:
                 return None
                 
             # Find the expiration date closest to but after earnings
-            earnings_date = stock.calendar.iloc[0, 0]
             valid_expirations = [exp for exp in expirations 
                                if pd.to_datetime(exp) > earnings_date]
             
@@ -180,11 +199,63 @@ class EarningsStraddle:
             
         # Get fresh data
         self.cached_data = self.get_large_caps_with_earnings()
+        
+        # Filter for high probability trades
+        if not self.cached_data.empty:
+            self.cached_data = self.filter_high_probability_trades(self.cached_data)
+            
         self.last_update = current_time
         return self.cached_data
 
+    def filter_high_probability_trades(self, df):
+        """Filter for high probability trades based on various criteria"""
+        # Calculate days until earnings
+        df['days_to_earnings'] = (pd.to_datetime(df['earnings_date']) - pd.Timestamp.now()).dt.days
+        
+        # Calculate straddle cost as percentage of stock price
+        df['straddle_percentage'] = (df['straddle_cost'] / df['current_price']) * 100
+        
+        # Calculate option liquidity score (based on volume)
+        df['total_volume'] = df['call_volume'] + df['put_volume']
+        
+        # Filter criteria
+        filtered_df = df[
+            # Adequate liquidity
+            (df['total_volume'] > 100) &
+            
+            # Reasonable implied volatility (not too high or low)
+            (df['avg_iv'] > 0.2) & 
+            (df['avg_iv'] < 1.5) &
+            
+            # Earnings within next 2 weeks
+            (df['days_to_earnings'] <= 14) &
+            (df['days_to_earnings'] > 0) &
+            
+            # Reasonable straddle cost (not too expensive relative to stock price)
+            (df['straddle_percentage'] < 10) &
+            
+            # Ensure bid-ask spreads aren't too wide
+            ((df['call_ask'] - df['call_bid']) / df['call_ask'] < 0.15) &
+            ((df['put_ask'] - df['put_bid']) / df['put_ask'] < 0.15)
+        ]
+        
+        # Calculate a composite score for ranking
+        filtered_df['probability_score'] = (
+            filtered_df['total_volume'] / filtered_df['total_volume'].max() * 0.3 +  # Volume weight
+            (1 - filtered_df['straddle_percentage'] / filtered_df['straddle_percentage'].max()) * 0.3 +  # Cost weight
+            (1 - filtered_df['days_to_earnings'] / filtered_df['days_to_earnings'].max()) * 0.2 +  # Time weight
+            filtered_df['avg_iv'] / filtered_df['avg_iv'].max() * 0.2  # IV weight
+        )
+        
+        # Sort by probability score and take top results
+        return filtered_df.sort_values('probability_score', ascending=False).head(10)
+
 def main():
     st.title("Live Earnings Straddle Analysis")
+    
+    # Move session state initialization to the top
+    if 'last_refresh' not in st.session_state:
+        st.session_state.last_refresh = time.time()
     
     st.write("""
     This tool analyzes potential straddle opportunities for upcoming earnings announcements using real-time options data.
@@ -197,9 +268,21 @@ def main():
     # Add auto-refresh
     auto_refresh = st.checkbox('Enable auto-refresh (5 min interval)', value=True)
     
+    current_time = time.time()
     if auto_refresh:
-        st.write(f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Calculate time since last refresh
+        time_since_refresh = current_time - st.session_state.last_refresh
+        time_until_next = max(300 - time_since_refresh, 0)  # 300 seconds = 5 minutes
         
+        # Display countdown
+        st.write(f"Next refresh in: {int(time_until_next)} seconds")
+        st.write(f"Last update: {datetime.fromtimestamp(st.session_state.last_refresh).strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Only refresh if 5 minutes have passed
+        if time_since_refresh >= 300:
+            st.session_state.last_refresh = current_time
+            st.rerun()
+    
     # Get data
     results_df = analyzer.get_data()
     
@@ -208,19 +291,67 @@ def main():
         return
     
     # Display results
-    st.subheader("Upcoming Earnings Straddle Opportunities")
+    st.subheader("Top 10 Highest Probability Earnings Straddle Opportunities")
     
     # Format the display DataFrame
     display_df = results_df[[
         'symbol', 'earnings_date', 'current_price', 'strike',
-        'straddle_cost', 'avg_iv', 'expiration'
+        'straddle_cost', 'straddle_percentage', 'avg_iv', 
+        'total_volume', 'days_to_earnings', 'probability_score'
     ]].copy()
     
+    # Format the columns
     display_df['earnings_date'] = pd.to_datetime(display_df['earnings_date']).dt.strftime('%Y-%m-%d')
-    display_df['expiration'] = pd.to_datetime(display_df['expiration']).dt.strftime('%Y-%m-%d')
     display_df['avg_iv'] = display_df['avg_iv'] * 100  # Convert to percentage
+    display_df['probability_score'] = display_df['probability_score'].round(3)
+    display_df['straddle_percentage'] = display_df['straddle_percentage'].round(2)
     
-    st.dataframe(display_df.round(2))
+    # Sort by probability score
+    display_df = display_df.sort_values('probability_score', ascending=False)
+    
+    # Rename columns for better display
+    display_df.columns = [
+        'Symbol', 'Earnings Date', 'Current Price', 'Strike',
+        'Straddle Cost', 'Cost %', 'IV %', 
+        'Total Volume', 'Days to Earnings', 'Probability Score'
+    ]
+    
+    # Add color coding based on probability score
+    st.dataframe(
+        display_df.style
+        .background_gradient(
+            subset=['Probability Score'], 
+            cmap='RdYlGn'
+        )
+        .background_gradient(
+            subset=['Total Volume'],
+            cmap='Blues'
+        )
+        .background_gradient(
+            subset=['IV %'],
+            cmap='YlOrRd'
+        )
+        .format({
+            'Current Price': '${:.2f}',
+            'Strike': '${:.2f}',
+            'Straddle Cost': '${:.2f}',
+            'IV %': '{:.1f}%',
+            'Cost %': '{:.1f}%',
+            'Probability Score': '{:.3f}'
+        })
+    )
+    
+    # Add explanation of scoring
+    st.info("""
+    **Probability Score Factors:**
+    - Higher trading volume (better liquidity)
+    - Lower straddle cost relative to stock price
+    - Closer to earnings date
+    - Moderate implied volatility
+    - Tight bid-ask spreads
+    
+    Scores range from 0 to 1, with higher scores indicating potentially better opportunities.
+    """)
     
     # Detailed analysis for each stock
     st.subheader("Detailed Analysis by Stock")
@@ -253,11 +384,6 @@ def main():
                 st.write(f"Call IV: {row['call_iv']*100:.1f}%")
                 st.write(f"Put IV: {row['put_iv']*100:.1f}%")
                 st.write(f"Average IV: {row['avg_iv']*100:.1f}%")
-
-    # Auto-refresh logic
-    if auto_refresh:
-        time.sleep(1)  # Small delay to prevent excessive CPU usage
-        st.experimental_rerun()
 
 if __name__ == "__main__":
     main()
